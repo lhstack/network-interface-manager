@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use ipconfig::{IfType, OperStatus};
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -31,6 +32,14 @@ pub struct NetworkInterface {
     // 接口类型（例如：以太网、Wifi）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub if_type: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub gateways:Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guid:Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub mask:Vec<String>,
+    pub receive_link_speed: u64,
+    pub transmit_link_speed:u64,
 }
 #[tauri::command]
 #[cfg(target_os = "windows")]
@@ -40,6 +49,12 @@ fn get_all_network_interface() -> Result<Vec<NetworkInterface>, String> {
     let mut interfaces = Vec::new();
 
     for adapter in adapters {
+        if adapter.oper_status() != OperStatus::IfOperStatusUp && adapter.oper_status() != OperStatus::IfOperStatusDown {
+            continue;
+        }
+        if adapter.if_type() == IfType::SoftwareLoopback {
+            continue;
+        }
         // 初始化一个空的 DNS 服务器集合（使用集合去重）
         let mut dns_set = HashSet::new();
 
@@ -68,7 +83,7 @@ fn get_all_network_interface() -> Result<Vec<NetworkInterface>, String> {
         dns_list.sort();
         // 构建 NetworkInterface 实例
         let iface = NetworkInterface {
-            name: adapter.adapter_name().to_string(),
+            name: adapter.friendly_name().to_string(),
             description: Some(adapter.description().to_string()),
             mac_address: adapter
                 .physical_address()
@@ -82,27 +97,22 @@ fn get_all_network_interface() -> Result<Vec<NetworkInterface>, String> {
             ipv4: ipv4_list,
             ipv6: ipv6_list,
             dns_servers: dns_list,
-            enabled: adapter.oper_status() == ipconfig::OperStatus::IfOperStatusUp,
+            enabled: adapter.oper_status() == OperStatus::IfOperStatusUp,
             if_type: Some(format!("{:?}", adapter.if_type())),
+            gateways: adapter.gateways().iter().map(|item|{
+                item.to_string()
+            }).collect(),
+            guid: Some(adapter.adapter_name().to_string()),
+            mask: adapter.prefixes().iter().map(|item|{
+                format!("{}/{}",item.0.to_string(),item.1)
+            }).collect(),
+            receive_link_speed: adapter.receive_link_speed(),
+            transmit_link_speed: adapter.transmit_link_speed(),
         };
 
         interfaces.push(iface);
     }
-    Ok(interfaces.iter().filter(|iface| {
-        if iface.enabled {
-            match &iface.if_type {
-                None => {
-                    return true
-                }
-                Some(v) => {
-                    if v != "SoftwareLoopback" {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }).cloned().collect())
+    Ok(interfaces)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
