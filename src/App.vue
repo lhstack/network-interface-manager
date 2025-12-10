@@ -1,7 +1,11 @@
 <script setup>
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import {Setting,Location,Position} from '@element-plus/icons-vue'
 const network_interfaces = ref([]);
+const alert = async (msg) => {
+  window.alert(msg)
+}
 async function get_network_interfaces() {
   network_interfaces.value = await invoke("get_all_network_interface");
 }
@@ -15,7 +19,19 @@ setInterval(() => {
   <main class="container">
     <el-card class="card"  v-for="iface in network_interfaces">
       <div>
-        <el-text class="mx-1" size="large" type="primary">网卡名称</el-text>
+        <div class="header">
+          <el-text class="mx-1" size="large" type="primary">网卡名称</el-text>
+          <el-dropdown trigger="click">
+            <el-button type="primary" :icon="Setting" circle></el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item @click="alert('设置ip: ' + iface.name)"><el-icon><Location /></el-icon>设置ip</el-dropdown-item>
+                <el-dropdown-item @click="alert('设置dns: ' + iface.name)"><el-icon><Position /></el-icon>设置dns</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+
+        </div>
         <el-scrollbar>
           <div class="scrollbar-flex-content">
             <el-text class="mx-1 scrollbar-demo-item" type="primary">{{iface.name}}</el-text>
@@ -85,6 +101,10 @@ setInterval(() => {
 </template>
 
 <style scoped>
+.header{
+  display: flex;
+  justify-content: space-between;
+}
 .card {
   text-align: left;
   max-width: 400px;
