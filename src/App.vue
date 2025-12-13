@@ -3,6 +3,7 @@ import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import {Setting,Position,Delete,Plus,Edit} from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import { enable, isEnabled, disable } from '@tauri-apps/plugin-autostart';
 
 const network_interfaces = ref([]);
 const showDnsDialog = ref(false);
@@ -14,11 +15,10 @@ const isMonitoring = ref(false);
 const editingTaskId = ref(null);
 const showSettingsDialog = ref(false);
 const isAdmin = ref(false);
-const autostartEnabled = ref(false);
-
 const dnsForm = ref({
   dns_servers: ''
 });
+const isAutoStartEnabled = ref(false);
 
 const taskForm = ref({
   name: '',
@@ -208,13 +208,21 @@ async function checkAdminStatus() {
 
 async function handleAutostartChange() {
   try {
-    await invoke("set_autostart", { enabled: autostartEnabled.value });
-    ElMessage.success(autostartEnabled.value ? '开机自启已启用' : '开机自启已禁用');
+    let enabled = await isEnabled()
+    if(enabled){
+      await disable()
+      isAutoStartEnabled.value = false
+      ElMessage.success('开机自启已禁用');
+    }else {
+      await enable()
+      isAutoStartEnabled.value = true
+      ElMessage.success('开机自启已启用');
+    }
   } catch (error) {
     ElMessage.error(`设置开机自启失败: ${error}`);
-    autostartEnabled.value = !autostartEnabled.value;
   }
 }
+
 
 async function initializeApp() {
   try {
@@ -226,6 +234,7 @@ async function initializeApp() {
     await get_network_interfaces();
     await loadTasks();
     await checkMonitoringStatus();
+    isAutoStartEnabled.value = await isEnabled()
   } catch (error) {
     console.error('Failed to initialize app:', error);
   }
@@ -423,7 +432,7 @@ setInterval(() => {
           </el-text>
         </el-form-item>
         <el-form-item label="开机自启">
-          <el-switch v-model="autostartEnabled" @change="handleAutostartChange" />
+          <el-switch v-model="isAutoStartEnabled" @change="handleAutostartChange" />
         </el-form-item>
       </el-form>
       <template #footer>

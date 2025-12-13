@@ -1,10 +1,10 @@
+use crate::db::Database;
+use crate::network_info::get_all_network_interfaces;
 use serde::{Deserialize, Serialize};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use crate::network_info::get_all_network_interfaces;
-use crate::db::Database;
-use std::process::Command;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -13,8 +13,8 @@ use std::os::windows::process::CommandExt;
 pub struct DnsTask {
     pub id: String,
     pub name: String,
-    pub interface_pattern: String,  // 网卡名称匹配规则（支持通配符）
-    pub target_dns: Vec<String>,    // 目标DNS服务器
+    pub interface_pattern: String, // 网卡名称匹配规则（支持通配符）
+    pub target_dns: Vec<String>,   // 目标DNS服务器
     pub enabled: bool,
     pub created_at: i64,
 }
@@ -25,7 +25,7 @@ pub struct TaskStatus {
     pub interface_name: String,
     pub current_dns: Vec<String>,
     pub target_dns: Vec<String>,
-    pub status: String,  // "matched", "dns_mismatch", "applied"
+    pub status: String, // "matched", "dns_mismatch", "applied"
     pub last_check: i64,
 }
 
@@ -81,7 +81,7 @@ impl DnsTaskManager {
     pub fn restore_monitoring_state(&self) -> Result<(), String> {
         // 等待一下，确保数据库初始化完成
         std::thread::sleep(Duration::from_millis(100));
-        
+
         // 如果之前启用了监控，自动启动
         if let Ok(enabled) = self.monitoring_enabled.lock() {
             if *enabled {
@@ -184,9 +184,10 @@ impl DnsTaskManager {
                 }
 
                 // 使用catch_unwind保护get_all_network_interfaces调用
-                let interfaces_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    get_all_network_interfaces()
-                }));
+                let interfaces_result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        get_all_network_interfaces()
+                    }));
 
                 let interfaces = match interfaces_result {
                     Ok(Ok(ifaces)) => ifaces,
@@ -213,51 +214,52 @@ impl DnsTaskManager {
 
                 let mut statuses = Vec::new();
 
-                    for task in tasks_list.iter() {
-                        if !task.enabled {
+                for task in tasks_list.iter() {
+                    if !task.enabled {
+                        continue;
+                    }
+
+                    for iface in &interfaces {
+                        if !iface.enabled {
                             continue;
                         }
 
-                        for iface in &interfaces {
-                            if !iface.enabled {
-                                continue;
-                            }
+                        // 匹配网卡名称
+                        if matches_pattern(&iface.name, &task.interface_pattern) {
+                            let current_dns = iface.dns_servers.clone();
+                            let target_dns = task.target_dns.clone();
 
-                            // 匹配网卡名称
-                            if matches_pattern(&iface.name, &task.interface_pattern) {
-                                let current_dns = iface.dns_servers.clone();
-                                let target_dns = task.target_dns.clone();
-
-                                let status_str = if current_dns == target_dns {
-                                    "matched".to_string()
-                                } else {
-                                    // DNS不匹配，尝试设置
-                                    // 使用catch_unwind来防止panic导致线程崩溃
-                                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let status_str = if current_dns == target_dns {
+                                "matched".to_string()
+                            } else {
+                                // DNS不匹配，尝试设置
+                                // 使用catch_unwind来防止panic导致线程崩溃
+                                let result =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                         set_interface_dns(&iface.name, &target_dns)
                                     }));
 
-                                    match result {
-                                        Ok(Ok(_)) => "applied".to_string(),
-                                        Ok(Err(_)) => "dns_mismatch".to_string(),
-                                        Err(_) => {
-                                            eprintln!("Panic caught in set_interface_dns");
-                                            "dns_mismatch".to_string()
-                                        }
+                                match result {
+                                    Ok(Ok(_)) => "applied".to_string(),
+                                    Ok(Err(_)) => "dns_mismatch".to_string(),
+                                    Err(_) => {
+                                        eprintln!("Panic caught in set_interface_dns");
+                                        "dns_mismatch".to_string()
                                     }
-                                };
+                                }
+                            };
 
-                                statuses.push(TaskStatus {
-                                    task_id: task.id.clone(),
-                                    interface_name: iface.name.clone(),
-                                    current_dns,
-                                    target_dns,
-                                    status: status_str,
-                                    last_check: chrono::Local::now().timestamp(),
-                                });
-                            }
+                            statuses.push(TaskStatus {
+                                task_id: task.id.clone(),
+                                interface_name: iface.name.clone(),
+                                current_dns,
+                                target_dns,
+                                status: status_str,
+                                last_check: chrono::Local::now().timestamp(),
+                            });
                         }
                     }
+                }
 
                 // 安全地更新状态
                 if let Ok(mut status_lock) = task_statuses.lock() {
@@ -350,12 +352,16 @@ fn set_dns_windows_internal(interface_name: &str, dns_servers: &[String]) -> Res
         return Err("DNS servers list is empty".to_string());
     }
 
-    let mut cmd = format!("netsh interface ip set dns \"{}\" static {}", 
-        interface_name, dns_servers[0]);
+    let mut cmd = format!(
+        "netsh interface ip set dns \"{}\" static {}",
+        interface_name, dns_servers[0]
+    );
 
     for dns in &dns_servers[1..] {
-        cmd.push_str(&format!(" & netsh interface ip add dns \"{}\" {}", 
-            interface_name, dns));
+        cmd.push_str(&format!(
+            " & netsh interface ip add dns \"{}\" {}",
+            interface_name, dns
+        ));
     }
 
     let output = Command::new("cmd")
@@ -374,8 +380,10 @@ fn set_dns_windows_internal(interface_name: &str, dns_servers: &[String]) -> Res
 #[cfg(target_os = "linux")]
 fn set_dns_linux_internal(interface_name: &str, dns_servers: &[String]) -> Result<(), String> {
     let dns_list = dns_servers.join(" ");
-    let cmd = format!("echo 'nameserver {}' | sudo tee /etc/resolv.conf > /dev/null", 
-        dns_list.replace(" ", "\nnameserver "));
+    let cmd = format!(
+        "echo 'nameserver {}' | sudo tee /etc/resolv.conf > /dev/null",
+        dns_list.replace(" ", "\nnameserver ")
+    );
 
     let output = Command::new("sh")
         .args(&["-c", &cmd])

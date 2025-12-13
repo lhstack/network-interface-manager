@@ -35,3 +35,6 @@ ipconfig = "*"
 winapi = { version = "0.3", features = ["winuser", "processthreadsapi", "securitybaseapi", "shellapi"] }
 is_elevated = "0.1"
 
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-autostart = "2"
+

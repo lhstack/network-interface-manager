@@ -1,6 +1,6 @@
-use rusqlite::{Connection, Result as SqliteResult, params};
-use std::fs;
 use crate::dns_task::DnsTask;
+use rusqlite::{params, Connection, Result as SqliteResult};
+use std::fs;
 
 pub struct Database {
     conn: Connection,
@@ -9,9 +9,8 @@ pub struct Database {
 impl Database {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         // 获取用户主目录
-        let home_dir = dirs::home_dir()
-            .ok_or("Failed to get home directory")?;
-        
+        let home_dir = dirs::home_dir().ok_or("Failed to get home directory")?;
+
         // 创建.network interface manager目录
         let data_dir = home_dir.join(".network interface manager");
         if !data_dir.exists() {
@@ -20,7 +19,7 @@ impl Database {
 
         let db_path = data_dir.join("tasks.db");
         let conn = Connection::open(&db_path)?;
-        
+
         let db = Database { conn };
         db.init_tables()?;
         Ok(db)
@@ -38,7 +37,7 @@ impl Database {
             )",
             [],
         )?;
-        
+
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS monitoring_state (
                 id INTEGER PRIMARY KEY,
@@ -46,21 +45,22 @@ impl Database {
             )",
             [],
         )?;
-        
+
         // 初始化监控状态
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM monitoring_state",
-            [],
-            |row| row.get(0),
-        ).unwrap_or(0);
-        
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM monitoring_state", [], |row| {
+                row.get(0)
+            })
+            .unwrap_or(0);
+
         if count == 0 {
             self.conn.execute(
                 "INSERT INTO monitoring_state (id, enabled) VALUES (1, 0)",
                 [],
             )?;
         }
-        
+
         Ok(())
     }
 
@@ -83,10 +83,8 @@ impl Database {
     }
 
     pub fn remove_task(&self, task_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-        self.conn.execute(
-            "DELETE FROM dns_tasks WHERE id = ?1",
-            params![task_id],
-        )?;
+        self.conn
+            .execute("DELETE FROM dns_tasks WHERE id = ?1", params![task_id])?;
         Ok(())
     }
 
@@ -109,24 +107,25 @@ impl Database {
 
     pub fn get_all_tasks(&self) -> Result<Vec<DnsTask>, Box<dyn std::error::Error>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, interface_pattern, target_dns, enabled, created_at FROM dns_tasks"
+            "SELECT id, name, interface_pattern, target_dns, enabled, created_at FROM dns_tasks",
         )?;
 
-        let tasks = stmt.query_map([], |row| {
-            let target_dns_json: String = row.get(3)?;
-            let target_dns: Vec<String> = serde_json::from_str(&target_dns_json)
-                .unwrap_or_default();
+        let tasks = stmt
+            .query_map([], |row| {
+                let target_dns_json: String = row.get(3)?;
+                let target_dns: Vec<String> =
+                    serde_json::from_str(&target_dns_json).unwrap_or_default();
 
-            Ok(DnsTask {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                interface_pattern: row.get(2)?,
-                target_dns,
-                enabled: row.get::<_, i32>(4)? != 0,
-                created_at: row.get(5)?,
-            })
-        })?
-        .collect::<SqliteResult<Vec<_>>>()?;
+                Ok(DnsTask {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    interface_pattern: row.get(2)?,
+                    target_dns,
+                    enabled: row.get::<_, i32>(4)? != 0,
+                    created_at: row.get(5)?,
+                })
+            })?
+            .collect::<SqliteResult<Vec<_>>>()?;
 
         Ok(tasks)
     }
@@ -140,11 +139,14 @@ impl Database {
     }
 
     pub fn get_monitoring_state(&self) -> Result<bool, Box<dyn std::error::Error>> {
-        let enabled: i32 = self.conn.query_row(
-            "SELECT enabled FROM monitoring_state WHERE id = 1",
-            [],
-            |row| row.get(0),
-        ).unwrap_or(0);
+        let enabled: i32 = self
+            .conn
+            .query_row(
+                "SELECT enabled FROM monitoring_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
         Ok(enabled != 0)
     }
 }

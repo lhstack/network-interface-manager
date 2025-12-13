@@ -33,12 +33,15 @@ pub struct NetworkInterface {
 #[cfg(target_os = "windows")]
 pub fn get_all_network_interfaces() -> Result<Vec<NetworkInterface>, String> {
     use ipconfig::{IfType, OperStatus};
-    
-    let adapters = ipconfig::get_adapters().map_err(|e| format!("Failed to get adapters: {}", e))?;
+
+    let adapters =
+        ipconfig::get_adapters().map_err(|e| format!("Failed to get adapters: {}", e))?;
     let mut interfaces = Vec::new();
 
     for adapter in adapters {
-        if adapter.oper_status() != OperStatus::IfOperStatusUp && adapter.oper_status() != OperStatus::IfOperStatusDown {
+        if adapter.oper_status() != OperStatus::IfOperStatusUp
+            && adapter.oper_status() != OperStatus::IfOperStatusDown
+        {
             continue;
         }
         if adapter.if_type() == IfType::SoftwareLoopback {
@@ -86,11 +89,17 @@ pub fn get_all_network_interfaces() -> Result<Vec<NetworkInterface>, String> {
             dns_servers: dns_list,
             enabled: adapter.oper_status() == OperStatus::IfOperStatusUp,
             if_type: Some(format!("{:?}", adapter.if_type())),
-            gateways: adapter.gateways().iter().map(|item| item.to_string()).collect(),
+            gateways: adapter
+                .gateways()
+                .iter()
+                .map(|item| item.to_string())
+                .collect(),
             guid: Some(adapter.adapter_name().to_string()),
-            mask: adapter.prefixes().iter().map(|item| {
-                format!("{}/{}", item.0.to_string(), item.1)
-            }).collect(),
+            mask: adapter
+                .prefixes()
+                .iter()
+                .map(|item| format!("{}/{}", item.0.to_string(), item.1))
+                .collect(),
             receive_link_speed: adapter.receive_link_speed(),
             transmit_link_speed: adapter.transmit_link_speed(),
         };

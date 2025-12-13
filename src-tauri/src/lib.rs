@@ -6,9 +6,9 @@ use tauri::Manager;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-mod network_info;
-mod dns_task;
 mod db;
+mod dns_task;
+mod network_info;
 
 use dns_task::{DnsTask, TASK_MANAGER};
 use network_info::{get_all_network_interfaces, NetworkInterface};
@@ -55,7 +55,7 @@ fn start_dns_monitoring() -> Result<(), String> {
     TASK_MANAGER.start_monitoring()
 }
 
-#[tauri::command] 
+#[tauri::command]
 fn stop_dns_monitoring() -> Result<(), String> {
     TASK_MANAGER.stop_monitoring()
 }
@@ -82,7 +82,7 @@ fn is_admin() -> Result<bool, String> {
     {
         Ok(is_elevated::is_elevated())
     }
-    
+
     #[cfg(not(target_os = "windows"))]
     {
         Ok(unsafe { libc::geteuid() == 0 })
@@ -90,155 +90,13 @@ fn is_admin() -> Result<bool, String> {
 }
 
 #[tauri::command]
-fn set_autostart(enabled: bool) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        set_autostart_windows(enabled)
-    }
-    
-    #[cfg(target_os = "linux")]
-    {
-        set_autostart_linux(enabled)
-    }
-    
-    #[cfg(target_os = "macos")]
-    {
-        set_autostart_macos(enabled)
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn set_autostart_windows(enabled: bool) -> Result<(), String> {
-    use std::fs;
-    
-    let app_path = std::env::current_exe()
-        .map_err(|e| format!("Failed to get app path: {}", e))?;
-    
-    let startup_dir = dirs::config_dir()
-        .ok_or("Failed to get config directory")?
-        .join("Microsoft\\Windows\\Start Menu\\Programs\\Startup");
-    
-    let shortcut_path = startup_dir.join("NetworkInterfaceManager.lnk");
-    
-    if enabled {
-        // 创建快捷方式
-        let cmd = format!(
-            "powershell -Command \"$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('{}'); $Shortcut.TargetPath = '{}'; $Shortcut.Save()\"",
-            shortcut_path.display(),
-            app_path.display()
-        );
-        
-        let output = Command::new("cmd")
-            .args(&["/C", &cmd])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-            .output()
-            .map_err(|e| format!("Failed to create shortcut: {}", e))?;
-        
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).to_string());
-        }
-    } else {
-        // 删除快捷方式
-        if shortcut_path.exists() {
-            fs::remove_file(&shortcut_path)
-                .map_err(|e| format!("Failed to remove shortcut: {}", e))?;
-        }
-    }
-    
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn set_autostart_linux(enabled: bool) -> Result<(), String> {
-    use std::path::PathBuf;
-    use std::fs;
-    
-    let app_path = std::env::current_exe()
-        .map_err(|e| format!("Failed to get app path: {}", e))?;
-    
-    let autostart_dir = dirs::config_dir()
-        .ok_or("Failed to get config directory")?
-        .join("autostart");
-    
-    let desktop_file = autostart_dir.join("network-interface-manager.desktop");
-    
-    if enabled {
-        fs::create_dir_all(&autostart_dir)
-            .map_err(|e| format!("Failed to create autostart directory: {}", e))?;
-        
-        let content = format!(
-            "[Desktop Entry]\nType=Application\nName=Network Interface Manager\nExec={}\nX-GNOME-Autostart-enabled=true\n",
-            app_path.display()
-        );
-        
-        fs::write(&desktop_file, content)
-            .map_err(|e| format!("Failed to write desktop file: {}", e))?;
-    } else {
-        if desktop_file.exists() {
-            fs::remove_file(&desktop_file)
-                .map_err(|e| format!("Failed to remove desktop file: {}", e))?;
-        }
-    }
-    
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn set_autostart_macos(enabled: bool) -> Result<(), String> {
-    use std::path::PathBuf;
-    use std::fs;
-    
-    let app_path = std::env::current_exe()
-        .map_err(|e| format!("Failed to get app path: {}", e))?;
-    
-    let launch_agents_dir = dirs::home_dir()
-        .ok_or("Failed to get home directory")?
-        .join("Library/LaunchAgents");
-    
-    let plist_file = launch_agents_dir.join("com.network-interface-manager.plist");
-    
-    if enabled {
-        fs::create_dir_all(&launch_agents_dir)
-            .map_err(|e| format!("Failed to create LaunchAgents directory: {}", e))?;
-        
-        let content = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.network-interface-manager</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{}</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-</dict>
-</plist>"#,
-            app_path.display()
-        );
-        
-        fs::write(&plist_file, content)
-            .map_err(|e| format!("Failed to write plist file: {}", e))?;
-    } else {
-        if plist_file.exists() {
-            fs::remove_file(&plist_file)
-                .map_err(|e| format!("Failed to remove plist file: {}", e))?;
-        }
-    }
-    
-    Ok(())
-}
-
-#[tauri::command]
 fn set_dns_servers(config: DnsConfig) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     return set_dns_windows(&config);
-    
+
     #[cfg(target_os = "linux")]
     return set_dns_linux(&config);
-    
+
     #[cfg(target_os = "macos")]
     return set_dns_macos(&config);
 }
@@ -250,12 +108,16 @@ fn set_dns_windows(config: &DnsConfig) -> Result<String, String> {
         return Err("DNS servers list is empty".to_string());
     }
 
-    let mut cmd = format!("netsh interface ip set dns \"{}\" static {}", 
-        config.interface_name, config.dns_servers[0]);
+    let mut cmd = format!(
+        "netsh interface ip set dns \"{}\" static {}",
+        config.interface_name, config.dns_servers[0]
+    );
 
     for dns in &config.dns_servers[1..] {
-        cmd.push_str(&format!(" & netsh interface ip add dns \"{}\" {}", 
-            config.interface_name, dns));
+        cmd.push_str(&format!(
+            " & netsh interface ip add dns \"{}\" {}",
+            config.interface_name, dns
+        ));
     }
 
     let output = Command::new("cmd")
@@ -275,7 +137,10 @@ fn set_dns_windows(config: &DnsConfig) -> Result<String, String> {
 #[allow(dead_code)]
 fn set_dns_linux(config: &DnsConfig) -> Result<String, String> {
     let dns_list = config.dns_servers.join(" ");
-    let cmd = format!("echo 'nameserver {}' | sudo tee /etc/resolv.conf > /dev/null", dns_list.replace(" ", "\nnameserver "));
+    let cmd = format!(
+        "echo 'nameserver {}' | sudo tee /etc/resolv.conf > /dev/null",
+        dns_list.replace(" ", "\nnameserver ")
+    );
 
     let output = Command::new("sh")
         .args(&["-c", &cmd])
@@ -311,17 +176,17 @@ fn request_admin_privileges() -> Result<(), String> {
     use std::ffi::CString;
     use winapi::um::shellapi::ShellExecuteA;
     use winapi::um::winuser::SW_SHOW;
-    
-    let exe_path = std::env::current_exe()
-        .map_err(|e| format!("Failed to get executable path: {}", e))?;
-    
+
+    let exe_path =
+        std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
+
     let exe_path_str = exe_path.to_string_lossy().to_string();
-    let exe_path_cstr = CString::new(exe_path_str)
-        .map_err(|e| format!("Failed to create CString: {}", e))?;
-    
-    let operation = CString::new("runas")
-        .map_err(|e| format!("Failed to create operation string: {}", e))?;
-    
+    let exe_path_cstr =
+        CString::new(exe_path_str).map_err(|e| format!("Failed to create CString: {}", e))?;
+
+    let operation =
+        CString::new("runas").map_err(|e| format!("Failed to create operation string: {}", e))?;
+
     unsafe {
         let result = ShellExecuteA(
             std::ptr::null_mut(),
@@ -331,22 +196,22 @@ fn request_admin_privileges() -> Result<(), String> {
             std::ptr::null(),
             SW_SHOW,
         );
-        
+
         if result as i32 <= 32 {
             return Err("Failed to request administrator privileges".to_string());
         }
     }
-    
+
     Ok(())
 }
 
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     use tauri::menu::{Menu, MenuItem};
     use tauri::tray::TrayIconBuilder;
-    
+
     // 创建托盘菜单
     let menu = Menu::new(app)?;
-    
+
     // 添加"退出"菜单项
     let quit = MenuItem::new(app, "退出", true, Some("quit"))?;
     menu.append(&quit)?;
@@ -363,7 +228,11 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .on_tray_icon_event(|tray, event| {
             use tauri::tray::TrayIconEvent;
             match event {
-                TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } => {
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } => {
                     // 左键点击托盘图标切换显示/隐藏
                     let app = tray.app_handle();
                     if let Some(window) = app.get_webview_window("main") {
@@ -376,10 +245,10 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .build(app)?;
-    
+
     // 保持托盘图标活跃
-    std::mem::forget(tray);
-    
+    // std::mem::forget(tray);
+
     Ok(())
 }
 
@@ -395,6 +264,7 @@ pub fn run() {
         }
     }
     tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_all_network_interface,
@@ -409,8 +279,7 @@ pub fn run() {
             is_dns_monitoring_running,
             restore_monitoring_state,
             init_app,
-            is_admin,
-            set_autostart
+            is_admin
         ])
         .setup(|app| {
             #[cfg(target_os = "linux")]
@@ -421,13 +290,13 @@ pub fn run() {
                     std::process::exit(1);
                 }
             }
-            
+
             #[cfg(target_os = "macos")]
             {
                 // macOS通常不需要root权限来修改DNS，但可以检查
                 // 如果需要，可以在这里添加权限检查
             }
-            
+
             // 设置托盘菜单
             setup_tray(app)?;
 
@@ -446,4 +315,3 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-
