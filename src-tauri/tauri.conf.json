@@ -15,7 +15,7 @@
         "title": "网络接口管理",
         "width": 840,
         "height": 666,
-        "skipTaskbar": true
+        "skipTaskbar": false
       }
     ],
     "security": {

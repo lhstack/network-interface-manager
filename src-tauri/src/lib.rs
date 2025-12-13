@@ -236,9 +236,17 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     // 左键点击托盘图标切换显示/隐藏
                     let app = tray.app_handle();
                     if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.unminimize();
-                        let _ = window.show();
-                        let _ = window.set_focus();
+                        if window.is_visible().unwrap_or(false) {
+                            // 如果窗口可见，隐藏它
+                            let _ = window.set_skip_taskbar(true);
+                            let _ = window.hide();
+                        } else {
+                            // 如果窗口隐藏，显示它
+                            let _ = window.set_skip_taskbar(false);
+                            let _ = window.unminimize();
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
                     }
                 }
                 _ => {}
@@ -306,8 +314,16 @@ pub fn run() {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     // 阻止窗口关闭，改为最小化到托盘
+                    // 隐藏时从任务栏移除
+                    let _ = window.set_skip_taskbar(true);
                     window.hide().ok();
                     api.prevent_close();
+                }
+                tauri::WindowEvent::Focused(focused) => {
+                    // 窗口获得焦点时，确保显示在任务栏
+                    if *focused {
+                        let _ = window.set_skip_taskbar(false);
+                    }
                 }
                 _ => {}
             }
