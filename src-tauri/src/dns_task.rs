@@ -17,16 +17,32 @@ pub struct DnsTask {
     pub target_dns: Vec<String>,   // 目标DNS服务器
     pub enabled: bool,
     pub created_at: i64,
+    #[serde(default = "default_interval")]
+    pub interval: u64,             // 检查间隔（秒），默认1秒
+}
+
+fn default_interval() -> u64 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskStatus {
     pub task_id: String,
+    pub task_name: String,
     pub interface_name: String,
     pub current_dns: Vec<String>,
     pub target_dns: Vec<String>,
-    pub status: String, // "matched", "dns_mismatch", "applied"
-    pub last_check: i64,
+    pub status: String, // "matched", "dns_mismatch", "applied", "running", "stopped"
+    pub last_check: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub time: String,
+    pub task_id: String,
+    pub task_name: String,
+    pub message: String,
 }
 
 pub struct DnsTaskManager {
@@ -35,6 +51,7 @@ pub struct DnsTaskManager {
     task_statuses: Arc<Mutex<Vec<TaskStatus>>>,
     db: Arc<Mutex<Option<Database>>>,
     monitoring_enabled: Arc<Mutex<bool>>,
+    logs: Arc<Mutex<Vec<LogEntry>>>,
 }
 
 impl DnsTaskManager {
@@ -46,7 +63,21 @@ impl DnsTaskManager {
             task_statuses: Arc::new(Mutex::new(Vec::new())),
             db: Arc::new(Mutex::new(None)),
             monitoring_enabled: Arc::new(Mutex::new(false)),
+            logs: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+    
+    // 获取日志
+    pub fn get_logs(&self) -> Result<Vec<LogEntry>, String> {
+        let logs = self.logs.lock().map_err(|e| e.to_string())?;
+        Ok(logs.clone())
+    }
+    
+    // 清空日志
+    pub fn clear_logs(&self) -> Result<(), String> {
+        let mut logs = self.logs.lock().map_err(|e| e.to_string())?;
+        logs.clear();
+        Ok(())
     }
 
     pub fn init_database(&self) -> Result<(), String> {
@@ -170,13 +201,16 @@ impl DnsTaskManager {
         let tasks = Arc::clone(&self.tasks);
         let task_statuses = Arc::clone(&self.task_statuses);
         let running_flag = Arc::clone(&self.running);
+        let logs = Arc::clone(&self.logs);
 
         thread::spawn(move || {
+            let mut last_check_times: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
+            
             loop {
                 // 检查是否应该继续运行
                 let should_continue = match running_flag.lock() {
                     Ok(flag) => *flag,
-                    Err(_) => break, // 如果锁被poisoned，退出线程
+                    Err(_) => break,
                 };
 
                 if !should_continue {
@@ -192,12 +226,11 @@ impl DnsTaskManager {
                 let interfaces = match interfaces_result {
                     Ok(Ok(ifaces)) => ifaces,
                     Ok(Err(_)) => {
-                        thread::sleep(Duration::from_secs(1));
+                        thread::sleep(Duration::from_millis(500));
                         continue;
                     }
                     Err(_) => {
-                        eprintln!("Panic caught in get_all_network_interfaces");
-                        thread::sleep(Duration::from_secs(1));
+                        thread::sleep(Duration::from_millis(500));
                         continue;
                     }
                 };
@@ -206,18 +239,35 @@ impl DnsTaskManager {
                 let tasks_list = match tasks.lock() {
                     Ok(list) => list.clone(),
                     Err(_) => {
-                        // 如果锁被poisoned，跳过这次迭代
-                        thread::sleep(Duration::from_secs(1));
+                        thread::sleep(Duration::from_millis(500));
                         continue;
                     }
                 };
 
                 let mut statuses = Vec::new();
+                let now = std::time::Instant::now();
 
                 for task in tasks_list.iter() {
                     if !task.enabled {
+                        statuses.push(TaskStatus {
+                            task_id: task.id.clone(),
+                            task_name: task.name.clone(),
+                            interface_name: task.interface_pattern.clone(),
+                            current_dns: vec![],
+                            target_dns: task.target_dns.clone(),
+                            status: "stopped".to_string(),
+                            last_check: "-".to_string(),
+                            message: "任务已禁用".to_string(),
+                        });
                         continue;
                     }
+
+                    // 检查是否到达检查间隔
+                    let interval = if task.interval < 1 { 1 } else { task.interval };
+                    let should_check = match last_check_times.get(&task.id) {
+                        Some(last_time) => now.duration_since(*last_time).as_secs() >= interval,
+                        None => true,
+                    };
 
                     for iface in &interfaces {
                         if !iface.enabled {
@@ -228,34 +278,71 @@ impl DnsTaskManager {
                         if matches_pattern(&iface.name, &task.interface_pattern) {
                             let current_dns = iface.dns_servers.clone();
                             let target_dns = task.target_dns.clone();
+                            let last_check_str = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-                            let status_str = if current_dns == target_dns {
-                                "matched".to_string()
+                            let (status_str, message) = if !should_check {
+                                // 还没到检查时间
+                                ("running".to_string(), "等待下次检查".to_string())
+                            } else if dns_equal(&current_dns, &target_dns) {
+                                ("matched".to_string(), "DNS配置正确".to_string())
                             } else {
                                 // DNS不匹配，尝试设置
-                                // 使用catch_unwind来防止panic导致线程崩溃
                                 let result =
                                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                         set_interface_dns(&iface.name, &target_dns)
                                     }));
 
+                                // 更新最后检查时间
+                                last_check_times.insert(task.id.clone(), now);
+
                                 match result {
-                                    Ok(Ok(_)) => "applied".to_string(),
-                                    Ok(Err(_)) => "dns_mismatch".to_string(),
+                                    Ok(Ok(_)) => {
+                                        // 添加日志
+                                        if let Ok(mut log_lock) = logs.lock() {
+                                            log_lock.insert(0, LogEntry {
+                                                time: last_check_str.clone(),
+                                                task_id: task.id.clone(),
+                                                task_name: task.name.clone(),
+                                                message: format!("DNS已设置: {} -> {:?}", iface.name, target_dns),
+                                            });
+                                            if log_lock.len() > 100 {
+                                                log_lock.truncate(100);
+                                            }
+                                        }
+                                        // 刷新DNS缓存
+                                        #[cfg(target_os = "windows")]
+                                        flush_dns_cache();
+                                        ("applied".to_string(), "DNS已自动设置".to_string())
+                                    }
+                                    Ok(Err(e)) => {
+                                        if let Ok(mut log_lock) = logs.lock() {
+                                            log_lock.insert(0, LogEntry {
+                                                time: last_check_str.clone(),
+                                                task_id: task.id.clone(),
+                                                task_name: task.name.clone(),
+                                                message: format!("设置DNS失败: {}", e),
+                                            });
+                                            if log_lock.len() > 100 {
+                                                log_lock.truncate(100);
+                                            }
+                                        }
+                                        ("dns_mismatch".to_string(), format!("设置失败: {}", e))
+                                    }
                                     Err(_) => {
-                                        eprintln!("Panic caught in set_interface_dns");
-                                        "dns_mismatch".to_string()
+                                        ("dns_mismatch".to_string(), "设置DNS时发生错误".to_string())
                                     }
                                 }
                             };
 
                             statuses.push(TaskStatus {
                                 task_id: task.id.clone(),
+                                task_name: task.name.clone(),
                                 interface_name: iface.name.clone(),
                                 current_dns,
                                 target_dns,
                                 status: status_str,
-                                last_check: chrono::Local::now().timestamp(),
+                                last_check: last_check_str,
+                                message,
                             });
                         }
                     }
@@ -266,7 +353,7 @@ impl DnsTaskManager {
                     *status_lock = statuses;
                 }
 
-                thread::sleep(Duration::from_secs(1));
+                thread::sleep(Duration::from_millis(500));
             }
         });
 
@@ -296,6 +383,29 @@ impl DnsTaskManager {
         let running = self.running.lock().map_err(|e| e.to_string())?;
         Ok(*running)
     }
+}
+
+// DNS比较函数（忽略顺序）
+fn dns_equal(a: &[String], b: &[String]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut a_set: std::collections::HashSet<&String> = a.iter().collect();
+    for dns in b {
+        if !a_set.remove(dns) {
+            return false;
+        }
+    }
+    a_set.is_empty()
+}
+
+// 刷新DNS缓存
+#[cfg(target_os = "windows")]
+fn flush_dns_cache() {
+    let _ = Command::new("cmd")
+        .args(&["/C", "ipconfig /flushdns"])
+        .creation_flags(0x08000000)
+        .output();
 }
 
 fn matches_pattern(name: &str, pattern: &str) -> bool {

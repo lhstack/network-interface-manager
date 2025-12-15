@@ -1,6 +1,6 @@
 [package]
 name = "network-interface-manager"
-version = "0.1.0"
+version = "0.1.1"
 description = "a network interface manager panel"
 authors = ["lhstack"]
 edition = "2021"

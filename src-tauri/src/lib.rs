@@ -19,6 +19,20 @@ pub struct DnsConfig {
     pub dns_servers: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkConfig {
+    pub interface_name: String,
+    pub dhcp: bool,
+    #[serde(default)]
+    pub ip_address: String,
+    #[serde(default)]
+    pub subnet_mask: String,
+    #[serde(default)]
+    pub gateway: String,
+    #[serde(default)]
+    pub dns: Vec<String>,
+}
+
 #[tauri::command]
 fn get_all_network_interface() -> Result<Vec<NetworkInterface>, String> {
     get_all_network_interfaces()
@@ -74,6 +88,340 @@ fn restore_monitoring_state() -> Result<(), String> {
 fn init_app() -> Result<(), String> {
     TASK_MANAGER.init_database()?;
     TASK_MANAGER.restore_monitoring_state()
+}
+
+#[tauri::command]
+fn get_logs() -> Result<Vec<dns_task::LogEntry>, String> {
+    TASK_MANAGER.get_logs()
+}
+
+#[tauri::command]
+fn clear_logs() -> Result<(), String> {
+    TASK_MANAGER.clear_logs()
+}
+
+#[tauri::command]
+fn set_network_config(config: NetworkConfig) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    return set_network_config_windows(&config);
+
+    #[cfg(target_os = "linux")]
+    return set_network_config_linux(&config);
+
+    #[cfg(target_os = "macos")]
+    return set_network_config_macos(&config);
+}
+
+#[cfg(target_os = "windows")]
+fn set_network_config_windows(config: &NetworkConfig) -> Result<String, String> {
+    if config.dhcp {
+        enable_dhcp_windows(&config.interface_name, &config.dns)
+    } else {
+        set_static_ip_windows(config)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn enable_dhcp_windows(interface_name: &str, dns: &[String]) -> Result<String, String> {
+    // 启用DHCP获取IP
+    let cmd = format!(
+        "netsh interface ip set address name=\"{}\" source=dhcp",
+        interface_name
+    );
+    
+    let output = Command::new("cmd")
+        .args(&["/C", &cmd])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .output()
+        .map_err(|e| format!("Failed to execute command: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // 忽略"已经是DHCP"的错误
+        if !stderr.is_empty() && !stderr.contains("DHCP") {
+            return Err(stderr.to_string());
+        }
+    }
+
+    // 如果指定了DNS，设置静态DNS；否则使用DHCP获取DNS
+    if !dns.is_empty() {
+        set_dns_windows_internal(interface_name, dns)?;
+    } else {
+        let dns_cmd = format!(
+            "netsh interface ip set dns name=\"{}\" source=dhcp",
+            interface_name
+        );
+        Command::new("cmd")
+            .args(&["/C", &dns_cmd])
+            .creation_flags(0x08000000)
+            .output()
+            .ok();
+    }
+
+    // 刷新DNS缓存
+    flush_dns_cache_windows();
+
+    Ok(format!("DHCP enabled for {}", interface_name))
+}
+
+#[cfg(target_os = "windows")]
+fn set_static_ip_windows(config: &NetworkConfig) -> Result<String, String> {
+    if config.ip_address.is_empty() || config.subnet_mask.is_empty() {
+        return Err("IP address and subnet mask are required for static configuration".to_string());
+    }
+
+    // 设置静态IP
+    let cmd = if config.gateway.is_empty() {
+        format!(
+            "netsh interface ip set address name=\"{}\" static {} {}",
+            config.interface_name, config.ip_address, config.subnet_mask
+        )
+    } else {
+        format!(
+            "netsh interface ip set address name=\"{}\" static {} {} {}",
+            config.interface_name, config.ip_address, config.subnet_mask, config.gateway
+        )
+    };
+
+    let output = Command::new("cmd")
+        .args(&["/C", &cmd])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .output()
+        .map_err(|e| format!("Failed to execute command: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.is_empty() {
+            return Err(stderr.to_string());
+        }
+    }
+
+    // 设置DNS
+    if !config.dns.is_empty() {
+        set_dns_windows_internal(&config.interface_name, &config.dns)?;
+    }
+
+    // 刷新DNS缓存
+    flush_dns_cache_windows();
+
+    Ok(format!("Static IP configured for {}", config.interface_name))
+}
+
+#[cfg(target_os = "windows")]
+fn set_dns_windows_internal(interface_name: &str, dns_servers: &[String]) -> Result<(), String> {
+    if dns_servers.is_empty() {
+        return Ok(());
+    }
+
+    // 设置主DNS
+    let cmd = format!(
+        "netsh interface ip set dns name=\"{}\" static {}",
+        interface_name, dns_servers[0]
+    );
+
+    let output = Command::new("cmd")
+        .args(&["/C", &cmd])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| format!("Failed to execute command: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.is_empty() {
+            return Err(stderr.to_string());
+        }
+    }
+
+    // 添加备用DNS
+    for (i, dns) in dns_servers.iter().skip(1).enumerate() {
+        let add_cmd = format!(
+            "netsh interface ip add dns name=\"{}\" {} index={}",
+            interface_name, dns, i + 2
+        );
+        Command::new("cmd")
+            .args(&["/C", &add_cmd])
+            .creation_flags(0x08000000)
+            .output()
+            .ok();
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn flush_dns_cache_windows() {
+    Command::new("cmd")
+        .args(&["/C", "ipconfig /flushdns"])
+        .creation_flags(0x08000000)
+        .output()
+        .ok();
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn set_network_config_linux(config: &NetworkConfig) -> Result<String, String> {
+    if config.dhcp {
+        enable_dhcp_linux(&config.interface_name)
+    } else {
+        set_static_ip_linux(config)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn enable_dhcp_linux(interface_name: &str) -> Result<String, String> {
+    // 尝试使用nmcli
+    let output = Command::new("nmcli")
+        .args(&["con", "mod", interface_name, "ipv4.method", "auto"])
+        .output();
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            // 重新激活连接
+            Command::new("nmcli")
+                .args(&["con", "up", interface_name])
+                .output()
+                .ok();
+            return Ok(format!("DHCP enabled for {}", interface_name));
+        }
+    }
+
+    // 回退到dhclient
+    let output = Command::new("dhclient")
+        .arg(interface_name)
+        .output()
+        .map_err(|e| format!("Failed to run dhclient: {}", e))?;
+
+    if output.status.success() {
+        Ok(format!("DHCP enabled for {}", interface_name))
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn set_static_ip_linux(config: &NetworkConfig) -> Result<String, String> {
+    if config.ip_address.is_empty() || config.subnet_mask.is_empty() {
+        return Err("IP address and subnet mask are required".to_string());
+    }
+
+    // 计算CIDR前缀
+    let prefix = subnet_mask_to_prefix(&config.subnet_mask);
+
+    // 使用ip命令设置
+    let cmd = format!(
+        "ip addr flush dev {} && ip addr add {}/{} dev {}",
+        config.interface_name, config.ip_address, prefix, config.interface_name
+    );
+
+    let output = Command::new("sh")
+        .args(&["-c", &cmd])
+        .output()
+        .map_err(|e| format!("Failed to set IP: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    // 设置网关
+    if !config.gateway.is_empty() {
+        let gw_cmd = format!("ip route add default via {}", config.gateway);
+        Command::new("sh")
+            .args(&["-c", &gw_cmd])
+            .output()
+            .ok();
+    }
+
+    // 设置DNS
+    if !config.dns.is_empty() {
+        let dns_content = config.dns.iter()
+            .map(|d| format!("nameserver {}", d))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write("/etc/resolv.conf", dns_content).ok();
+    }
+
+    Ok(format!("Static IP configured for {}", config.interface_name))
+}
+
+#[cfg(target_os = "linux")]
+fn subnet_mask_to_prefix(mask: &str) -> u32 {
+    let parts: Vec<u8> = mask.split('.')
+        .filter_map(|p| p.parse().ok())
+        .collect();
+    
+    if parts.len() != 4 {
+        return 24; // 默认
+    }
+
+    let mask_val: u32 = ((parts[0] as u32) << 24)
+        | ((parts[1] as u32) << 16)
+        | ((parts[2] as u32) << 8)
+        | (parts[3] as u32);
+    
+    mask_val.count_ones()
+}
+
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+fn set_network_config_macos(config: &NetworkConfig) -> Result<String, String> {
+    if config.dhcp {
+        enable_dhcp_macos(&config.interface_name)
+    } else {
+        set_static_ip_macos(config)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn enable_dhcp_macos(interface_name: &str) -> Result<String, String> {
+    let output = Command::new("networksetup")
+        .args(&["-setdhcp", interface_name])
+        .output()
+        .map_err(|e| format!("Failed to enable DHCP: {}", e))?;
+
+    if output.status.success() {
+        Ok(format!("DHCP enabled for {}", interface_name))
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_static_ip_macos(config: &NetworkConfig) -> Result<String, String> {
+    if config.ip_address.is_empty() || config.subnet_mask.is_empty() {
+        return Err("IP address and subnet mask are required".to_string());
+    }
+
+    let router = if config.gateway.is_empty() { "empty" } else { &config.gateway };
+
+    let output = Command::new("networksetup")
+        .args(&[
+            "-setmanual",
+            &config.interface_name,
+            &config.ip_address,
+            &config.subnet_mask,
+            router,
+        ])
+        .output()
+        .map_err(|e| format!("Failed to set static IP: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    // 设置DNS
+    if !config.dns.is_empty() {
+        let dns_args: Vec<&str> = std::iter::once("-setdnsservers")
+            .chain(std::iter::once(config.interface_name.as_str()))
+            .chain(config.dns.iter().map(|s| s.as_str()))
+            .collect();
+        
+        Command::new("networksetup")
+            .args(&dns_args)
+            .output()
+            .ok();
+    }
+
+    Ok(format!("Static IP configured for {}", config.interface_name))
 }
 
 #[tauri::command]
@@ -216,13 +564,14 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let quit = MenuItem::new(app, "退出", true, Some("quit"))?;
     menu.append(&quit)?;
     // 创建托盘图标并关联菜单
-    let tray = TrayIconBuilder::new()
+    let _tray = TrayIconBuilder::new()
         .menu(&menu)
         .icon(app.default_window_icon().unwrap().clone())
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| {
             if event.id.as_ref() == quit.id().as_ref() {
                 app.exit(0);
+                std::process::exit(0);
             }
         })
         .on_tray_icon_event(|tray, event| {
@@ -277,6 +626,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_all_network_interface,
             set_dns_servers,
+            set_network_config,
             add_dns_task,
             remove_dns_task,
             get_dns_tasks,
@@ -287,7 +637,9 @@ pub fn run() {
             is_dns_monitoring_running,
             restore_monitoring_state,
             init_app,
-            is_admin
+            is_admin,
+            get_logs,
+            clear_logs
         ])
         .setup(|app| {
             #[cfg(target_os = "linux")]
